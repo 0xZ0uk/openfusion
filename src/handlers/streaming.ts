@@ -1,7 +1,7 @@
 import { streamSSE } from "hono/streaming";
 import { createModuleLogger } from "../logger.js";
+import { cleanResponse } from "../cleaner.js";
 import { runFusionPanelJudge, runOuterModel } from "../fusion.js";
-import { callLiteLLMStream } from "../litellm.js";
 import type { LLMAdapter } from "../types.js";
 
 const log = createModuleLogger("stream");
@@ -58,11 +58,27 @@ export async function handleFusionStream(
         llm,
       );
 
-      // 4. Stream outer model
-      log.info("Streaming: starting outer model stream", {
+      // 4. Collect outer model response (non-streaming), clean it, then stream
+      log.info("Streaming: collecting outer model response", {
         reqId,
         outer_model: fc.outer_model,
       });
+
+      const outerModelResult = await llm.complete({
+        model: fc.outer_model,
+        messages: outerResult.resolvedMessages,
+        temperature: fc.temperature,
+        max_tokens: fc.max_tokens,
+      });
+
+      const cleanedContent = cleanResponse(outerModelResult.content, fc.outer_model);
+      if (cleanedContent !== outerModelResult.content) {
+        log.info("Streaming: outer model response cleaned", {
+          model: fc.outer_model,
+          before: outerModelResult.content.length,
+          after: cleanedContent.length,
+        });
+      }
 
       // Role-first chunk (OpenAI convention)
       stream.writeSSE({
@@ -77,51 +93,36 @@ export async function handleFusionStream(
         }),
       });
 
-      let streamedContent = "";
-      for await (const chunk of callLiteLLMStream({
-        model: fc.outer_model,
-        messages: outerResult.resolvedMessages,
-        temperature: fc.temperature,
-        max_tokens: fc.max_tokens,
-      })) {
-        const choice = chunk.choices?.[0];
-        if (choice?.delta?.content) {
-          streamedContent += choice.delta.content;
-          stream.writeSSE({
-            data: JSON.stringify({
-              id: fusionId,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: fc.outer_model,
-              choices: [
-                {
-                  index: 0,
-                  delta: { content: choice.delta.content },
-                  finish_reason: null,
-                },
-              ],
-            }),
-          });
-        }
-        if (choice?.finish_reason) {
-          stream.writeSSE({
-            data: JSON.stringify({
-              id: fusionId,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: fc.outer_model,
-              choices: [
-                { index: 0, delta: {}, finish_reason: choice.finish_reason },
-              ],
-            }),
-          });
-        }
+      // Stream the cleaned response in a single chunk
+      if (cleanedContent) {
+        stream.writeSSE({
+          data: JSON.stringify({
+            id: fusionId,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: fc.outer_model,
+            choices: [
+              {
+                index: 0,
+                delta: { content: cleanedContent },
+                finish_reason: null,
+              },
+            ],
+          }),
+        });
       }
 
-      log.info("Streaming: outer model stream complete", {
-        reqId,
-        durationMs: Date.now() - reqStart,
-        content_length: streamedContent.length,
+      // Finish chunk
+      stream.writeSSE({
+        data: JSON.stringify({
+          id: fusionId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: fc.outer_model,
+          choices: [
+            { index: 0, delta: {}, finish_reason: "stop" },
+          ],
+        }),
       });
 
       // Fusion metadata
