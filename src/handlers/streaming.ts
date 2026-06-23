@@ -1,7 +1,9 @@
 import { streamSSE } from "hono/streaming";
 import { createModuleLogger } from "../logger.js";
 import { cleanResponse } from "../cleaner.js";
-import { runFusionPanelJudge, runOuterModel } from "../fusion.js";
+import { runFusionPanelJudge, runExploration } from "../fusion.js";
+import { COMPOSER_PROMPT } from "../prompts.js";
+import { EXPLORER_TOOLS, handleExplorerTool, getExplorerCwd } from "../explorer.js";
 import type { LLMAdapter } from "../types.js";
 
 const log = createModuleLogger("stream");
@@ -18,64 +20,78 @@ export async function handleFusionStream(
 
   return streamSSE(c, async (stream) => {
     try {
-      // 1. Panel + judge (internal, not streamed)
-      log.info("Streaming: running panel+judge phase", { reqId });
+      // Phase 1: Outer model explores the codebase with tools
+      log.info("Streaming: Phase 1 — exploration", { reqId });
+      const { explorationContext } = await runExploration({
+        messages,
+        fusionConfig: fc,
+        llm,
+      });
+
+      // Phase 2+3: Panel + Judge
+      log.info("Streaming: Phase 2+3 — panel and judge", { reqId });
       const { panelResponses, analysis, judgeRawContent } =
         await runFusionPanelJudge({
           messages,
           fusionConfig: fc,
           llm,
+          explorationContext,
         });
 
-      // 2. No outer model → return judge analysis directly
-      if (!fc.outer_model) {
-        log.info("Streaming: no outer model, returning judge analysis", { reqId });
-        stream.writeSSE({
-          data: JSON.stringify({
-            id: fusionId,
-            object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000),
-            model: fc.judge,
-            choices: [
-              {
-                index: 0,
-                delta: { role: "assistant", content: judgeRawContent },
-                finish_reason: "stop",
-              },
-            ],
-          }),
-        });
-        stream.writeSSE({ data: "[DONE]" });
-        return;
+      // Phase 4: Compose — build final messages, resolve any tool calls, then stream
+      log.info("Streaming: Phase 4 — composition", { reqId });
+
+      // Build the composition context
+      const panelSummary = panelResponses
+        .map(
+          (r: any) =>
+            `--- ${r.model} ---${r.error ? " [ERROR]" : ""}\n${r.content || "(no response)"}`,
+        )
+        .join("\n\n");
+
+      const contextParts: string[] = [];
+      if (explorationContext) {
+        contextParts.push(`## Codebase Exploration\n${explorationContext}`);
       }
+      contextParts.push(`## Panel Analyses\n${panelSummary}`);
+      contextParts.push(`## Judge Evaluation\n${judgeRawContent}`);
 
-      // 3. Resolve outer model messages (including web search if enabled)
-      log.info("Streaming: resolving outer model messages", { reqId });
-      const outerResult = await runOuterModel(
-        judgeRawContent,
-        messages,
-        fc,
-        llm,
-      );
+      const compositionMessages = [
+        {
+          role: "system" as const,
+          content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}`,
+        },
+        ...messages,
+      ];
 
-      // 4. Collect outer model response (non-streaming), clean it, then stream
-      log.info("Streaming: collecting outer model response", {
-        reqId,
-        outer_model: fc.outer_model,
+      const cwd = getExplorerCwd();
+
+      // Resolve any additional tool calls the outer model wants to make
+      const composeReq = {
+        model: fc.outer_model,
+        messages: compositionMessages,
+        temperature: fc.temperature,
+        max_tokens: fc.max_tokens,
+        tools: EXPLORER_TOOLS,
+        tool_choice: "auto" as const,
+      };
+
+      const resolved = await llm.resolveTools(composeReq, async (name, args) => {
+        return handleExplorerTool(name, args, cwd);
       });
 
-      const outerModelResult = await llm.complete({
+      // Now get the final clean text with one more call (no tools)
+      const finalResult = await llm.complete({
         model: fc.outer_model,
-        messages: outerResult.resolvedMessages,
+        messages: resolved.messages,
         temperature: fc.temperature,
         max_tokens: fc.max_tokens,
       });
 
-      const cleanedContent = cleanResponse(outerModelResult.content, fc.outer_model);
-      if (cleanedContent !== outerModelResult.content) {
-        log.info("Streaming: outer model response cleaned", {
-          model: fc.outer_model,
-          before: outerModelResult.content.length,
+      const cleanedContent = cleanResponse(finalResult.content, fc.outer_model);
+      if (cleanedContent !== finalResult.content) {
+        log.info("Streaming: final answer cleaned", {
+          before: finalResult.content.length,
           after: cleanedContent.length,
         });
       }
@@ -93,7 +109,7 @@ export async function handleFusionStream(
         }),
       });
 
-      // Stream the cleaned response in a single chunk
+      // Stream the cleaned response
       if (cleanedContent) {
         stream.writeSSE({
           data: JSON.stringify({

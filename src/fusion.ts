@@ -4,11 +4,18 @@ import { createModuleLogger } from "./logger.js";
 import {
   JUDGE_SYSTEM_PROMPT,
   PANEL_SYSTEM_PROMPT,
+  EXPLORER_PROMPT,
+  COMPOSER_PROMPT,
   buildJudgeUserMessage,
-  buildOuterSystemPrompt,
   formatSearchResults,
 } from "./prompts.js";
 import { searchWeb, SEARCH_TOOL } from "./search.js";
+import {
+  EXPLORER_TOOLS,
+  handleExplorerTool,
+  extractExplorationContext,
+  getExplorerCwd,
+} from "./explorer.js";
 import type {
   FusionConfig,
   FusionResult,
@@ -21,7 +28,7 @@ import type {
 
 const log = createModuleLogger("fusion");
 
-interface FusionInput {
+export interface FusionInput {
   messages: { role: string; content: string }[];
   fusionConfig: Required<FusionConfig>;
   llm: LLMAdapter;
@@ -34,29 +41,99 @@ function getLastUserMessage(
   return last?.content ?? "";
 }
 
-/**
- * Run just the panel + judge stages (no outer model).
- * This is used by both non-streaming and streaming flows.
- */
-export async function runFusionPanelJudge(
+// ──────────────────────────────────────────────
+// Phase 1: Outer model explores the codebase
+// ──────────────────────────────────────────────
+
+export async function runExploration(
   input: FusionInput,
-): Promise<PanelJudgeResult> {
+): Promise<{
+  explorationContext: string;
+  exploreUsage: Usage;
+}> {
   const { messages, fusionConfig, llm } = input;
+  const { outer_model: outerModel, temperature, max_tokens } = fusionConfig;
+
+  if (!outerModel) {
+    return { explorationContext: "", exploreUsage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } };
+  }
+
+  const cwd = getExplorerCwd();
+  log.info("Phase 1: Starting codebase exploration", {
+    outer_model: outerModel,
+    cwd,
+  });
+
+  const exploreReq: LiteLLMCompletionRequest = {
+    model: outerModel,
+    messages: [
+      { role: "system", content: EXPLORER_PROMPT },
+      ...messages,
+    ] as LiteLLMCompletionRequest["messages"],
+    temperature,
+    max_tokens,
+    tools: EXPLORER_TOOLS,
+    tool_choice: "auto",
+  };
+
+  const exploreStart = Date.now();
+  const resolved = await llm.resolveTools(exploreReq, async (name, args) => {
+    return handleExplorerTool(name, args, cwd);
+  });
+  const exploreDuration = Date.now() - exploreStart;
+
+  // Extract context from the resolved messages
+  const explorationContext = extractExplorationContext(resolved.messages);
+
+  log.info("Phase 1: Exploration complete", {
+    durationMs: exploreDuration,
+    context_length: explorationContext.length,
+    tool_turns: resolved.messages.filter((m) => m.role === "tool").length,
+    usage: resolved.usage,
+  });
+
+  return {
+    explorationContext,
+    exploreUsage: resolved.usage,
+  };
+}
+
+// ──────────────────────────────────────────────
+// Phase 2+3: Panel + Judge (shared by both paths)
+// ──────────────────────────────────────────────
+
+export async function runFusionPanelJudge(
+  input: FusionInput & { explorationContext?: string },
+): Promise<PanelJudgeResult> {
+  const { messages, fusionConfig, llm, explorationContext } = input;
   const { panel, judge, max_tokens, temperature } = fusionConfig;
 
   const pipelineStart = Date.now();
-  log.info("Panel+judge pipeline start", {
+  log.info("Phase 2: Panel+judge pipeline start", {
     panel_models: panel,
     judge_model: judge,
-    user_messages: messages.filter((m) => m.role === "user").length,
+    has_exploration_context: !!explorationContext,
   });
 
-  // ---- Step 1: parallel panel calls ----
+  // ---- Phase 2: parallel panel calls ----
   log.info("Panel stage: starting parallel calls", { count: panel.length });
-  const panelMessages = [
-    { role: "system" as const, content: PANEL_SYSTEM_PROMPT },
-    ...messages as LiteLLMCompletionRequest["messages"],
+
+  // Build panel messages: exploration context + panel prompt + user messages
+  const panelMessages: LiteLLMCompletionRequest["messages"] = [
+    { role: "system", content: PANEL_SYSTEM_PROMPT },
   ];
+
+  // Inject exploration context as a system message so panel models have data
+  if (explorationContext) {
+    panelMessages.push({
+      role: "system",
+      content: `## Codebase Exploration Findings\n\nHere is what was discovered about the codebase during initial exploration:\n\n${explorationContext}\n\n---\nAnalyze the above findings. Provide your own assessment.`,
+    });
+  }
+
+  // Add the original user messages
+  panelMessages.push(...messages as LiteLLMCompletionRequest["messages"]);
+
   const panelParams: LiteLLMCompletionRequest[] = panel.map((model) => ({
     model,
     messages: panelMessages,
@@ -79,7 +156,6 @@ export async function runFusionPanelJudge(
     const result = panelSettled[i];
     const modelName = panel[i];
     if (result.status === "fulfilled") {
-      // If model returned tool calls instead of text, note it
       const hasToolCalls = (result.value as any).tool_calls?.length > 0;
       const hasContent = result.value.content && result.value.content.length > 0;
       let content = result.value.content;
@@ -93,7 +169,6 @@ export async function runFusionPanelJudge(
           tools: toolNames,
         });
       } else if (hasContent) {
-        // Strip agent artifacts from panel responses so the judge gets clean input
         const cleaned = cleanResponse(content, modelName);
         if (cleaned !== content) {
           log.info("Panel model response cleaned", {
@@ -104,17 +179,14 @@ export async function runFusionPanelJudge(
           content = cleaned;
         }
       }
-      panelResponses.push({
-        model: modelName,
-        content,
-      });
+      panelResponses.push({ model: modelName, content });
       if (result.value.usage) {
         panelPromptTokens += result.value.usage.prompt_tokens;
         panelCompletionTokens += result.value.usage.completion_tokens;
       }
       log.info("Panel model succeeded", {
         model: modelName,
-        content_length: result.value.content.length,
+        content_length: content.length,
         usage: result.value.usage,
       });
     } else {
@@ -140,14 +212,19 @@ export async function runFusionPanelJudge(
     total_completion_tokens: panelCompletionTokens,
   });
 
-  // ---- Step 2: judge analysis ----
-  log.info("Judge stage: starting analysis", { judge_model: judge });
+  // ---- Phase 3: judge analysis ----
+  log.info("Phase 3: Judge stage starting", { judge_model: judge });
+
+  // Build judge messages with exploration context + panel responses
+  let judgeUserContent = buildJudgeUserMessage(messages, panelResponses);
+  if (explorationContext) {
+    judgeUserContent =
+      `## Codebase Exploration Context\n\n${explorationContext}\n\n---\n\n${judgeUserContent}`;
+  }
+
   const judgeMessages = [
     { role: "system" as const, content: JUDGE_SYSTEM_PROMPT },
-    {
-      role: "user" as const,
-      content: buildJudgeUserMessage(messages, panelResponses),
-    },
+    { role: "user" as const, content: judgeUserContent },
   ];
 
   const judgeStart = Date.now();
@@ -165,8 +242,12 @@ export async function runFusionPanelJudge(
     analysis = JSON.parse(judgeResult.content);
     log.info("Judge analysis parsed successfully", {
       durationMs: judgeDuration,
-      consensus_count: Array.isArray(analysis.consensus) ? analysis.consensus.length : 0,
-      contradictions_count: Array.isArray(analysis.contradictions) ? analysis.contradictions.length : 0,
+      consensus_count: Array.isArray(analysis.consensus)
+        ? analysis.consensus.length
+        : 0,
+      contradictions_count: Array.isArray(analysis.contradictions)
+        ? analysis.contradictions.length
+        : 0,
     });
   } catch {
     log.error("Judge returned invalid JSON", {
@@ -204,147 +285,153 @@ export async function runFusionPanelJudge(
   };
 }
 
-/**
- * Build the outer model request params (used by both streaming and non-streaming paths).
- */
-export function buildOuterModelRequest(
-  judgeRawContent: string,
-  messages: { role: string; content: string }[],
-  outerModel: string,
-  temperature: number,
-  max_tokens: number,
-  tools?: LiteLLMCompletionRequest["tools"],
-): LiteLLMCompletionRequest {
-  const outerSystemPrompt = buildOuterSystemPrompt(judgeRawContent);
+// ──────────────────────────────────────────────
+// Phase 4: Outer model composes final answer
+// ──────────────────────────────────────────────
 
-  return {
+/**
+ * Build the Phase 4 composition request.
+ * The outer model gets: COMPOSER_PROMPT + exploration context + panel responses +
+ * judge analysis + original messages + explorer tools.
+ */
+export async function runComposition(
+  judgeRawContent: string,
+  panelResponses: PanelResponse[],
+  explorationContext: string,
+  messages: { role: string; content: string }[],
+  fusionConfig: Required<FusionConfig>,
+  llm: LLMAdapter,
+): Promise<{ resolvedMessages: LiteLLMCompletionRequest["messages"]; usage: Usage }> {
+  const { outer_model: outerModel, temperature, max_tokens } = fusionConfig;
+
+  // Format panel responses for context
+  const panelSummary = panelResponses
+    .map(
+      (r) =>
+        `--- ${r.model} ---${r.error ? " [ERROR]" : ""}\n${r.content || "(no response)"}`,
+    )
+    .join("\n\n");
+
+  const contextParts: string[] = [];
+  if (explorationContext) {
+    contextParts.push(`## Codebase Exploration\n${explorationContext}`);
+  }
+  contextParts.push(`## Panel Analyses\n${panelSummary}`);
+  contextParts.push(`## Judge Evaluation\n${judgeRawContent}`);
+
+  const cwd = getExplorerCwd();
+
+  const composeReq: LiteLLMCompletionRequest = {
     model: outerModel,
     messages: [
-      { role: "system", content: outerSystemPrompt },
+      { role: "system", content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}` },
+      // Include the user's original messages so the outer model remembers the request
       ...messages,
     ] as LiteLLMCompletionRequest["messages"],
     temperature,
     max_tokens,
-    ...(tools ? { tools } : {}),
+    tools: EXPLORER_TOOLS,
+    tool_choice: "auto",
   };
-}
 
-/**
- * Run just the outer model stage: resolve messages (including web search if enabled)
- * and return the final message array. The caller is responsible for the final LLM call
- * (streaming or non-streaming).
- */
-export async function runOuterModel(
-  judgeRawContent: string,
-  messages: { role: string; content: string }[],
-  fusionConfig: Required<FusionConfig>,
-  llm: LLMAdapter,
-): Promise<{
-  resolvedMessages: LiteLLMCompletionRequest["messages"];
-  usage: Usage;
-}> {
-  const { outer_model: outerModel, web_search, temperature, max_tokens } = fusionConfig;
-
-  if (web_search && config.search.enabled) {
-    log.info("Outer model: web search enabled");
-    const outerReq = buildOuterModelRequest(
-      judgeRawContent,
-      messages,
-      outerModel,
-      temperature,
-      max_tokens,
-      [SEARCH_TOOL],
-    );
-
-    const resolved = await llm.resolveTools(outerReq, async (_name, args) => {
-      const query = (args.query as string) || getLastUserMessage(messages);
-      const results = await searchWeb(query);
-      log.info("Outer model search handler", {
-        query: query.slice(0, 100),
-        results_count: results.length,
-      });
-      return formatSearchResults(results) || "No results found.";
-    });
-
-    return {
-      resolvedMessages: resolved.messages,
-      usage: resolved.usage,
-    };
-  }
-
-  const outerReq = buildOuterModelRequest(
-    judgeRawContent,
-    messages,
-    outerModel,
-    temperature,
-    max_tokens,
-  );
+  const resolved = await llm.resolveTools(composeReq, async (name, args) => {
+    return handleExplorerTool(name, args, cwd);
+  });
 
   return {
-    resolvedMessages: outerReq.messages,
-    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    resolvedMessages: resolved.messages,
+    usage: resolved.usage,
   };
 }
 
-/**
- * Run the full Fusion pipeline (non-streaming):
- *   1. Parallel panel calls  →  panel responses
- *   2. Judge analysis        →  structured JSON
- *   3. Outer model           →  final composed answer (with optional search tool)
- */
+// ──────────────────────────────────────────────
+// Full pipeline (non-streaming)
+// ──────────────────────────────────────────────
+
 export async function runFusion(input: FusionInput): Promise<FusionResult> {
   const { messages, fusionConfig, llm } = input;
   const { outer_model: outerModel } = fusionConfig;
 
   const totalStart = Date.now();
 
-  // Panel + judge
-  const { panelResponses, analysis, judgeRawContent, usage } =
-    await runFusionPanelJudge(input);
+  // Phase 1: Explore
+  const { explorationContext, exploreUsage } = await runExploration(input);
 
-  // Step 3: outer model (if configured)
+  // Phase 2+3: Panel + Judge
+  const { panelResponses, analysis, judgeRawContent, usage: pjUsage } =
+    await runFusionPanelJudge({
+      ...input,
+      explorationContext,
+    });
+
+  // Phase 4: Compose
   if (outerModel) {
-    log.info("Outer model stage: starting", { outer_model: outerModel });
-    const outerStart = Date.now();
+    log.info("Phase 4: Outer model composition starting", {
+      outer_model: outerModel,
+    });
+    const composeStart = Date.now();
 
-    const outerResult = await runOuterModel(
+    const { usage: composeUsage } = await runComposition(
       judgeRawContent,
+      panelResponses,
+      explorationContext,
       messages,
       fusionConfig,
       llm,
     );
 
+    // The last assistant message in resolvedMessages is the final answer
+    // Actually, we need to extract it. Let's get it from a final complete call.
+    // Re-run with just messages (no tools) to get clean final text
+    const finalMessages = buildFinalMessages(
+      judgeRawContent,
+      panelResponses,
+      explorationContext,
+      messages,
+      fusionConfig,
+    );
+
     const finalResult = await llm.complete({
       model: outerModel,
-      messages: outerResult.resolvedMessages,
+      messages: finalMessages,
       temperature: fusionConfig.temperature,
       max_tokens: fusionConfig.max_tokens,
     });
 
-    // Strip agent artifacts from the final answer
     const cleanedAnswer = cleanResponse(finalResult.content, outerModel);
     if (cleanedAnswer !== finalResult.content) {
-      log.info("Outer model response cleaned", {
-        model: outerModel,
+      log.info("Final answer cleaned", {
         before: finalResult.content.length,
         after: cleanedAnswer.length,
       });
     }
 
-    const outerDuration = Date.now() - outerStart;
+    const composeDuration = Date.now() - composeStart;
     const totalDuration = Date.now() - totalStart;
 
     const totalUsage = {
-      prompt_tokens: usage.prompt_tokens + outerResult.usage.prompt_tokens + (finalResult.usage?.prompt_tokens ?? 0),
-      completion_tokens: usage.completion_tokens + outerResult.usage.completion_tokens + (finalResult.usage?.completion_tokens ?? 0),
-      total_tokens: usage.total_tokens + outerResult.usage.total_tokens + (finalResult.usage?.total_tokens ?? 0),
+      prompt_tokens:
+        exploreUsage.prompt_tokens +
+        pjUsage.prompt_tokens +
+        composeUsage.prompt_tokens +
+        (finalResult.usage?.prompt_tokens ?? 0),
+      completion_tokens:
+        exploreUsage.completion_tokens +
+        pjUsage.completion_tokens +
+        composeUsage.completion_tokens +
+        (finalResult.usage?.completion_tokens ?? 0),
+      total_tokens:
+        exploreUsage.total_tokens +
+        pjUsage.total_tokens +
+        composeUsage.total_tokens +
+        (finalResult.usage?.total_tokens ?? 0),
     };
 
     log.info("Fusion pipeline complete", {
       totalDurationMs: totalDuration,
-      outerDurationMs: outerDuration,
+      composeDurationMs: composeDuration,
       outer_model: outerModel,
-      final_answer_length: finalResult.content.length,
+      final_answer_length: cleanedAnswer.length,
       usage: totalUsage,
     });
 
@@ -357,11 +444,10 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
     };
   }
 
-  // No outer model — return judge analysis as the answer
-  const totalDuration = Date.now() - totalStart;
+  // No outer model — return judge analysis
   log.info("Fusion pipeline complete (no outer model)", {
-    totalDurationMs: totalDuration,
-    usage,
+    totalDurationMs: Date.now() - totalStart,
+    usage: pjUsage,
   });
 
   return {
@@ -369,13 +455,48 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
     panelResponses,
     analysis,
     judgeRawContent,
-    usage,
+    usage: pjUsage,
   };
 }
 
 /**
- * Resolve defaults and validate fusion config from a request.
+ * Build the final message array for the outer model's last call (no tools).
+ * This gives the outer model one clean shot at producing the answer.
  */
+function buildFinalMessages(
+  judgeRawContent: string,
+  panelResponses: PanelResponse[],
+  explorationContext: string,
+  messages: { role: string; content: string }[],
+  fusionConfig: Required<FusionConfig>,
+): LiteLLMCompletionRequest["messages"] {
+  const panelSummary = panelResponses
+    .map(
+      (r) =>
+        `--- ${r.model} ---${r.error ? " [ERROR]" : ""}\n${r.content || "(no response)"}`,
+    )
+    .join("\n\n");
+
+  const contextParts: string[] = [];
+  if (explorationContext) {
+    contextParts.push(`## Codebase Exploration\n${explorationContext}`);
+  }
+  contextParts.push(`## Panel Analyses\n${panelSummary}`);
+  contextParts.push(`## Judge Evaluation\n${judgeRawContent}`);
+
+  return [
+    {
+      role: "system",
+      content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}`,
+    },
+    ...messages,
+  ] as LiteLLMCompletionRequest["messages"];
+}
+
+// ──────────────────────────────────────────────
+// Config resolver
+// ──────────────────────────────────────────────
+
 export function resolveFusionConfig(
   fusionConfig: FusionConfig | undefined,
   requestModel: string,

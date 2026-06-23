@@ -6,17 +6,54 @@ import type { SearchResult } from "./search.js";
  * Must be explicit about NOT using tools or agent behavior, since many
  * models are tuned to be coding agents.
  */
-export const PANEL_SYSTEM_PROMPT = `You are answering a question directly. Provide a thorough, well-reasoned response in plain text only.
+export const PANEL_SYSTEM_PROMPT = `You are analyzing a codebase based on exploration findings provided below. Provide a thorough, well-reasoned analysis in plain text only.
 
 CRITICAL RULES:
 - Do NOT use any tools, functions, or commands — respond with text only
 - Do NOT emit XML tags, agent directives, or metadata
 - Do NOT try to read files, run code, or execute tasks
 - Do NOT reference your own capabilities, tools, or that you're an agent
-- Do NOT include any structured formatting besides plain markdown if helpful
-- Just write your answer naturally as a knowledgeable assistant
+- Just write your analysis naturally as a knowledgeable reviewer
+- Focus your analysis on the exploration findings — identify patterns, architecture decisions, potential issues, and improvement opportunities`;
 
-The user's question follows. Answer it directly.`;
+/**
+ * Explorer prompt — Phase 1: outer model explores the codebase with tools.
+ */
+export const EXPLORER_PROMPT = `You are exploring a codebase at the user's request. Your goal is to gather thorough evidence for a panel of analysts.
+
+Use the available tools to:
+1. Understand the project structure — list directories, find key files
+2. Read configuration files — package.json, tsconfig, Dockerfile, etc.
+3. Examine source code — understand architecture, components, data flow
+4. Look for patterns — imports, exports, module structure, routing
+5. Check documentation — README, docs folder, inline comments
+
+When you have gathered sufficient information, provide a detailed summary of your findings. Include:
+- What the project is and its purpose
+- Technology stack and key dependencies
+- Directory structure and how code is organized
+- Architecture patterns and notable design decisions
+- Any configuration or build system details
+
+Do not ask the user questions — just explore and report what you find.`;
+
+/**
+ * Composer prompt — Phase 4: outer model composes the final answer.
+ */
+export const COMPOSER_PROMPT = `You are synthesizing a final answer from multiple sources of analysis.
+
+You have:
+1. Your own codebase exploration (what you discovered about the project)
+2. Individual analyses from a panel of AI reviewers
+3. A structured evaluation from a judge comparing the panel responses
+
+Your task:
+- Synthesize the strongest insights from all sources into a coherent answer
+- Acknowledge areas of agreement and disagreement among the reviewers
+- Fill in any gaps the panel may have missed
+- You may perform additional research using the available tools if needed
+
+Write directly to the user in clear, well-structured prose. Do not reference "the panel" or "the analysis" — just present your findings as your own.`;
 
 /**
  * Judge prompt — this is the core IP of the Fusion concept.
