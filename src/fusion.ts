@@ -1,5 +1,4 @@
 import { config } from "./config.js";
-import { callLiteLLM, resolveTools } from "./litellm.js";
 import { createModuleLogger } from "./logger.js";
 import {
   JUDGE_SYSTEM_PROMPT,
@@ -14,6 +13,8 @@ import type {
   PanelJudgeResult,
   PanelResponse,
   LiteLLMCompletionRequest,
+  LLMAdapter,
+  Usage,
 } from "./types.js";
 
 const log = createModuleLogger("fusion");
@@ -21,6 +22,7 @@ const log = createModuleLogger("fusion");
 interface FusionInput {
   messages: { role: string; content: string }[];
   fusionConfig: Required<FusionConfig>;
+  llm: LLMAdapter;
 }
 
 function getLastUserMessage(
@@ -37,7 +39,7 @@ function getLastUserMessage(
 export async function runFusionPanelJudge(
   input: FusionInput,
 ): Promise<PanelJudgeResult> {
-  const { messages, fusionConfig } = input;
+  const { messages, fusionConfig, llm } = input;
   const { panel, judge, max_tokens, temperature } = fusionConfig;
 
   const pipelineStart = Date.now();
@@ -58,7 +60,7 @@ export async function runFusionPanelJudge(
 
   const panelStart = Date.now();
   const panelSettled = await Promise.allSettled(
-    panelParams.map((p) => callLiteLLM(p)),
+    panelParams.map((p) => llm.complete(p)),
   );
   const panelDuration = Date.now() - panelStart;
 
@@ -118,7 +120,7 @@ export async function runFusionPanelJudge(
   ];
 
   const judgeStart = Date.now();
-  const judgeResult = await callLiteLLM({
+  const judgeResult = await llm.complete({
     model: judge,
     messages: judgeMessages,
     temperature: 0.3,
@@ -208,9 +210,10 @@ export async function runOuterModel(
   judgeRawContent: string,
   messages: { role: string; content: string }[],
   fusionConfig: Required<FusionConfig>,
+  llm: LLMAdapter,
 ): Promise<{
   resolvedMessages: LiteLLMCompletionRequest["messages"];
-  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage: Usage;
 }> {
   const { outer_model: outerModel, web_search, temperature, max_tokens } = fusionConfig;
 
@@ -225,7 +228,7 @@ export async function runOuterModel(
       [SEARCH_TOOL],
     );
 
-    const resolved = await resolveTools(outerReq, async (_name, args) => {
+    const resolved = await llm.resolveTools(outerReq, async (_name, args) => {
       const query = (args.query as string) || getLastUserMessage(messages);
       const results = await searchWeb(query);
       log.info("Outer model search handler", {
@@ -262,7 +265,7 @@ export async function runOuterModel(
  *   3. Outer model           →  final composed answer (with optional search tool)
  */
 export async function runFusion(input: FusionInput): Promise<FusionResult> {
-  const { messages, fusionConfig } = input;
+  const { messages, fusionConfig, llm } = input;
   const { outer_model: outerModel } = fusionConfig;
 
   const totalStart = Date.now();
@@ -280,9 +283,10 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
       judgeRawContent,
       messages,
       fusionConfig,
+      llm,
     );
 
-    const finalResult = await callLiteLLM({
+    const finalResult = await llm.complete({
       model: outerModel,
       messages: outerResult.resolvedMessages,
       temperature: fusionConfig.temperature,

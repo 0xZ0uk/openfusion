@@ -11,9 +11,10 @@ import {
   resolveFusionConfig,
   runOuterModel,
 } from "./fusion.js";
-import { callLiteLLMStream } from "./litellm.js";
+import { callLiteLLMStream, createLLMAdapter } from "./litellm.js";
 
 const appLog = createModuleLogger("app");
+const llm = createLLMAdapter();
 
 // ---- Zod schemas ----
 
@@ -148,6 +149,7 @@ async function handleFusionNonStream(
     const result = await runFusion({
       messages: data.messages as { role: string; content: string }[],
       fusionConfig: fc as any,
+      llm,
     });
 
     const durationMs = Date.now() - reqStart;
@@ -222,6 +224,7 @@ async function handleFusionStream(
         await runFusionPanelJudge({
           messages,
           fusionConfig: fc as any,
+          llm,
         });
 
       // 2. No outer model → return judge analysis directly
@@ -252,6 +255,7 @@ async function handleFusionStream(
         judgeRawContent,
         messages,
         fc as any,
+        llm,
       );
 
       // 4. Stream outer model

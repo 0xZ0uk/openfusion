@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { config } from "./config.js";
 import { createModuleLogger } from "./logger.js";
-import type { LiteLLMCompletionRequest, ToolCall } from "./types.js";
+import type { LiteLLMCompletionRequest, ToolCall, CallResult, Usage, LLMAdapter } from "./types.js";
 
 const log = createModuleLogger("litellm");
 
@@ -25,16 +25,6 @@ function getClient(): OpenAI {
     });
   }
   return _client;
-}
-
-export interface CallResult {
-  content: string;
-  tool_calls?: ToolCall[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
 }
 
 /**
@@ -298,7 +288,7 @@ export async function resolveTools(
   maxTurns = 3,
 ): Promise<{
   messages: LiteLLMCompletionRequest["messages"];
-  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage: Usage;
 }> {
   const messages = [...params.messages];
   let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
@@ -367,4 +357,12 @@ export async function resolveTools(
 
   log.warn("Resolve tools max turns reached", { model: params.model, maxTurns });
   return { messages, usage: totalUsage };
+}
+
+export function createLLMAdapter(): LLMAdapter {
+  return {
+    complete: (params) => callLiteLLM(params),
+    completeStream: (params) => callLiteLLMStream(params),
+    resolveTools: (params, handler, maxTurns) => resolveTools(params, handler, maxTurns),
+  };
 }

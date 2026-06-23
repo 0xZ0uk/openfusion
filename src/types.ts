@@ -26,6 +26,18 @@ export interface FusionRequest {
 
 // ---- Response types ----
 
+export interface Usage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface CallResult {
+  content: string;
+  tool_calls?: ToolCall[];
+  usage?: Usage;
+}
+
 export interface PanelResponse {
   model: string;
   content: string;
@@ -66,11 +78,17 @@ export interface PanelJudgeResult {
   panelResponses: PanelResponse[];
   analysis: JudgeAnalysis;
   judgeRawContent: string;
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage: Usage;
+}
+
+export interface LLMAdapter {
+  complete(params: LiteLLMCompletionRequest): Promise<CallResult>;
+  completeStream(params: LiteLLMCompletionRequest): AsyncIterable<any>;
+  resolveTools(
+    params: LiteLLMCompletionRequest,
+    toolHandler: (name: string, args: Record<string, unknown>) => Promise<string>,
+    maxTurns?: number,
+  ): Promise<{ messages: LiteLLMCompletionRequest["messages"]; usage: Usage }>;
 }
 
 export interface FusionResult extends PanelJudgeResult {
