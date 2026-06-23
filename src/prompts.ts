@@ -96,7 +96,7 @@ export function buildJudgeUserMessage(
  * Build the outer-model system prompt: analysis gets appended as context.
  */
 export function buildOuterSystemPrompt(analysis: string): string {
-  return `You are a helpful assistant. Below is a multi-model analysis of the user's query. Use it to write a thorough, well-structured final answer.
+  return `You are a helpful assistant synthesizing multi-model analysis into a final answer. Write a thorough, well-structured response in plain text only.
 
 ## Multi-Model Analysis
 ${analysis}
@@ -104,7 +104,12 @@ ${analysis}
 ## Your task
 Answer the user's original question, drawing on the analysis above. Synthesize the consensus, acknowledge contradictions where relevant, and fill in any blind spots identified. Write directly to the user — do not reference "the analysis" or "the models" in your response.
 
-When you need current or factual information beyond your knowledge, use the available search tool to look it up. Do not search for information you already know or for conversational/non-factual queries.`;
+CRITICAL RULES:
+- Do NOT use any tools, functions, or commands — respond with text only
+- Do NOT emit XML tags, agent directives, or metadata
+- Do NOT try to read files, run code, or execute tasks
+- Do NOT include tool calls of any kind
+- Just write your final answer in plain text or markdown`;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { cleanResponse } from "./cleaner.js";
 import { createModuleLogger } from "./logger.js";
 import {
   JUDGE_SYSTEM_PROMPT,
@@ -91,6 +92,17 @@ export async function runFusionPanelJudge(
           model: modelName,
           tools: toolNames,
         });
+      } else if (hasContent) {
+        // Strip agent artifacts from panel responses so the judge gets clean input
+        const cleaned = cleanResponse(content, modelName);
+        if (cleaned !== content) {
+          log.info("Panel model response cleaned", {
+            model: modelName,
+            before: content.length,
+            after: cleaned.length,
+          });
+          content = cleaned;
+        }
       }
       panelResponses.push({
         model: modelName,
@@ -309,6 +321,16 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
       max_tokens: fusionConfig.max_tokens,
     });
 
+    // Strip agent artifacts from the final answer
+    const cleanedAnswer = cleanResponse(finalResult.content, outerModel);
+    if (cleanedAnswer !== finalResult.content) {
+      log.info("Outer model response cleaned", {
+        model: outerModel,
+        before: finalResult.content.length,
+        after: cleanedAnswer.length,
+      });
+    }
+
     const outerDuration = Date.now() - outerStart;
     const totalDuration = Date.now() - totalStart;
 
@@ -327,7 +349,7 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
     });
 
     return {
-      finalAnswer: finalResult.content,
+      finalAnswer: cleanedAnswer,
       panelResponses,
       analysis,
       judgeRawContent,
