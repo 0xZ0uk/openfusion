@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 *.log
+
+# Flue runtime artifacts
+.flue/
+.flue.build/

@@ -10,9 +10,14 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "docker:build": "docker build -t fusion-service .",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "flue:dev": "flue dev --target node",
+    "flue:build": "flue build --target node",
+    "flue:run": "flue run coder --target node"
   },
   "dependencies": {
+    "@flue/cli": "^1.0.0-beta.3",
+    "@flue/runtime": "^1.0.0-beta.3",
     "@hono/node-server": "^2.0.6",
     "dotenv": "^16.4.0",
     "hono": "^4.6.0",
