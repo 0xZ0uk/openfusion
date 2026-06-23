@@ -7,9 +7,7 @@ import {
   EXPLORER_PROMPT,
   COMPOSER_PROMPT,
   buildJudgeUserMessage,
-  formatSearchResults,
 } from "./prompts.js";
-import { searchWeb, SEARCH_TOOL } from "./search.js";
 import {
   EXPLORER_TOOLS,
   handleExplorerTool,
@@ -290,9 +288,8 @@ export async function runFusionPanelJudge(
 // ──────────────────────────────────────────────
 
 /**
- * Build the Phase 4 composition request.
- * The outer model gets: COMPOSER_PROMPT + exploration context + panel responses +
- * judge analysis + original messages + explorer tools.
+ * Build the Phase 4 composition messages and call the outer model.
+ * No tool loop — Phase 1 already explored the codebase. Just compose.
  */
 export async function runComposition(
   judgeRawContent: string,
@@ -301,10 +298,9 @@ export async function runComposition(
   messages: { role: string; content: string }[],
   fusionConfig: Required<FusionConfig>,
   llm: LLMAdapter,
-): Promise<{ resolvedMessages: LiteLLMCompletionRequest["messages"]; usage: Usage }> {
+): Promise<{ content: string; usage: Usage }> {
   const { outer_model: outerModel, temperature, max_tokens } = fusionConfig;
 
-  // Format panel responses for context
   const panelSummary = panelResponses
     .map(
       (r) =>
@@ -319,28 +315,22 @@ export async function runComposition(
   contextParts.push(`## Panel Analyses\n${panelSummary}`);
   contextParts.push(`## Judge Evaluation\n${judgeRawContent}`);
 
-  const cwd = getExplorerCwd();
-
-  const composeReq: LiteLLMCompletionRequest = {
+  const result = await llm.complete({
     model: outerModel,
     messages: [
-      { role: "system", content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}` },
-      // Include the user's original messages so the outer model remembers the request
+      {
+        role: "system",
+        content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}`,
+      },
       ...messages,
     ] as LiteLLMCompletionRequest["messages"],
     temperature,
     max_tokens,
-    tools: EXPLORER_TOOLS,
-    tool_choice: "auto",
-  };
-
-  const resolved = await llm.resolveTools(composeReq, async (name, args) => {
-    return handleExplorerTool(name, args, cwd);
   });
 
   return {
-    resolvedMessages: resolved.messages,
-    usage: resolved.usage,
+    content: result.content,
+    usage: result.usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
 }
 
@@ -371,7 +361,7 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
     });
     const composeStart = Date.now();
 
-    const { usage: composeUsage } = await runComposition(
+    const { content: composedContent, usage: composeUsage } = await runComposition(
       judgeRawContent,
       panelResponses,
       explorationContext,
@@ -380,51 +370,32 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
       llm,
     );
 
-    // The last assistant message in resolvedMessages is the final answer
-    // Actually, we need to extract it. Let's get it from a final complete call.
-    // Re-run with just messages (no tools) to get clean final text
-    const finalMessages = buildFinalMessages(
-      judgeRawContent,
-      panelResponses,
-      explorationContext,
-      messages,
-      fusionConfig,
-    );
+    const composeDuration = Date.now() - composeStart;
 
-    const finalResult = await llm.complete({
-      model: outerModel,
-      messages: finalMessages,
-      temperature: fusionConfig.temperature,
-      max_tokens: fusionConfig.max_tokens,
-    });
-
-    const cleanedAnswer = cleanResponse(finalResult.content, outerModel);
-    if (cleanedAnswer !== finalResult.content) {
+    // Clean agent artifacts from the final answer
+    const cleanedAnswer = cleanResponse(composedContent, outerModel);
+    if (cleanedAnswer !== composedContent) {
       log.info("Final answer cleaned", {
-        before: finalResult.content.length,
+        before: composedContent.length,
         after: cleanedAnswer.length,
       });
     }
 
-    const composeDuration = Date.now() - composeStart;
     const totalDuration = Date.now() - totalStart;
 
     const totalUsage = {
       prompt_tokens:
         exploreUsage.prompt_tokens +
         pjUsage.prompt_tokens +
-        composeUsage.prompt_tokens +
-        (finalResult.usage?.prompt_tokens ?? 0),
+        composeUsage.prompt_tokens,
       completion_tokens:
         exploreUsage.completion_tokens +
         pjUsage.completion_tokens +
-        composeUsage.completion_tokens +
-        (finalResult.usage?.completion_tokens ?? 0),
+        composeUsage.completion_tokens,
       total_tokens:
         exploreUsage.total_tokens +
         pjUsage.total_tokens +
-        composeUsage.total_tokens +
-        (finalResult.usage?.total_tokens ?? 0),
+        composeUsage.total_tokens,
     };
 
     log.info("Fusion pipeline complete", {
@@ -457,40 +428,6 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
     judgeRawContent,
     usage: pjUsage,
   };
-}
-
-/**
- * Build the final message array for the outer model's last call (no tools).
- * This gives the outer model one clean shot at producing the answer.
- */
-function buildFinalMessages(
-  judgeRawContent: string,
-  panelResponses: PanelResponse[],
-  explorationContext: string,
-  messages: { role: string; content: string }[],
-  fusionConfig: Required<FusionConfig>,
-): LiteLLMCompletionRequest["messages"] {
-  const panelSummary = panelResponses
-    .map(
-      (r) =>
-        `--- ${r.model} ---${r.error ? " [ERROR]" : ""}\n${r.content || "(no response)"}`,
-    )
-    .join("\n\n");
-
-  const contextParts: string[] = [];
-  if (explorationContext) {
-    contextParts.push(`## Codebase Exploration\n${explorationContext}`);
-  }
-  contextParts.push(`## Panel Analyses\n${panelSummary}`);
-  contextParts.push(`## Judge Evaluation\n${judgeRawContent}`);
-
-  return [
-    {
-      role: "system",
-      content: `${COMPOSER_PROMPT}\n\n${contextParts.join("\n\n")}`,
-    },
-    ...messages,
-  ] as LiteLLMCompletionRequest["messages"];
 }
 
 // ──────────────────────────────────────────────

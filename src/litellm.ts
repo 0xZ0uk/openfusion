@@ -209,6 +209,11 @@ export async function resolveTools(
     }
 
     if (!result.tool_calls || result.tool_calls.length === 0) {
+      // Push the final text response so callers can extract it from messages
+      messages.push({
+        role: "assistant",
+        content: result.content,
+      });
       log.info("Resolve tools complete", {
         model: params.model,
         turns: turn + 1,
@@ -255,6 +260,26 @@ export async function resolveTools(
   }
 
   log.warn("Resolve tools max turns reached", { model: params.model, maxTurns });
+
+  // One final call without tools to get a clean text answer
+  const finalResult = await callLiteLLM({
+    ...params,
+    messages,
+    tools: undefined,
+    tool_choice: undefined,
+  });
+
+  if (finalResult.usage) {
+    totalUsage.prompt_tokens += finalResult.usage.prompt_tokens;
+    totalUsage.completion_tokens += finalResult.usage.completion_tokens;
+    totalUsage.total_tokens += finalResult.usage.total_tokens;
+  }
+
+  messages.push({
+    role: "assistant",
+    content: finalResult.content,
+  });
+
   return { messages, usage: totalUsage };
 }
 

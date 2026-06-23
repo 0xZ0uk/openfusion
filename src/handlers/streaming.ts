@@ -3,7 +3,6 @@ import { createModuleLogger } from "../logger.js";
 import { cleanResponse } from "../cleaner.js";
 import { runFusionPanelJudge, runExploration } from "../fusion.js";
 import { COMPOSER_PROMPT } from "../prompts.js";
-import { EXPLORER_TOOLS, handleExplorerTool, getExplorerCwd } from "../explorer.js";
 import type { LLMAdapter } from "../types.js";
 
 const log = createModuleLogger("stream");
@@ -38,7 +37,8 @@ export async function handleFusionStream(
           explorationContext,
         });
 
-      // Phase 4: Compose — build final messages, resolve any tool calls, then stream
+      // Phase 4: Compose — one call to synthesize the final answer
+      // (No tool loop here — Phase 1 already explored the codebase)
       log.info("Streaming: Phase 4 — composition", { reqId });
 
       // Build the composition context
@@ -64,34 +64,26 @@ export async function handleFusionStream(
         ...messages,
       ];
 
-      const cwd = getExplorerCwd();
-
-      // Resolve any additional tool calls the outer model wants to make
-      const composeReq = {
+      const composeStart = Date.now();
+      const composeResult = await llm.complete({
         model: fc.outer_model,
         messages: compositionMessages,
         temperature: fc.temperature,
         max_tokens: fc.max_tokens,
-        tools: EXPLORER_TOOLS,
-        tool_choice: "auto" as const,
-      };
-
-      const resolved = await llm.resolveTools(composeReq, async (name, args) => {
-        return handleExplorerTool(name, args, cwd);
       });
 
-      // Now get the final clean text with one more call (no tools)
-      const finalResult = await llm.complete({
-        model: fc.outer_model,
-        messages: resolved.messages,
-        temperature: fc.temperature,
-        max_tokens: fc.max_tokens,
+      log.info("Phase 4: composition complete", {
+        durationMs: Date.now() - composeStart,
+        content_length: composeResult.content.length,
       });
 
-      const cleanedContent = cleanResponse(finalResult.content, fc.outer_model);
-      if (cleanedContent !== finalResult.content) {
+      const rawContent = composeResult.content ?? "";
+
+      // Clean agent artifacts from the final answer
+      const cleanedContent = cleanResponse(rawContent, fc.outer_model);
+      if (cleanedContent !== rawContent) {
         log.info("Streaming: final answer cleaned", {
-          before: finalResult.content.length,
+          before: rawContent.length,
           after: cleanedContent.length,
         });
       }
