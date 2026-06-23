@@ -78,9 +78,23 @@ export async function runFusionPanelJudge(
     const result = panelSettled[i];
     const modelName = panel[i];
     if (result.status === "fulfilled") {
+      // If model returned tool calls instead of text, note it
+      const hasToolCalls = (result.value as any).tool_calls?.length > 0;
+      const hasContent = result.value.content && result.value.content.length > 0;
+      let content = result.value.content;
+      if (!hasContent && hasToolCalls) {
+        const toolNames = (result.value as any).tool_calls
+          .map((tc: any) => tc.function?.name ?? "unknown")
+          .join(", ");
+        content = `[Model returned tool calls (${toolNames}) instead of text — response skipped]`;
+        log.warn("Panel model returned tool calls instead of text", {
+          model: modelName,
+          tools: toolNames,
+        });
+      }
       panelResponses.push({
         model: modelName,
-        content: result.value.content,
+        content,
       });
       if (result.value.usage) {
         panelPromptTokens += result.value.usage.prompt_tokens;
