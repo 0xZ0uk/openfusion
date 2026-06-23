@@ -1,6 +1,16 @@
 import type { SearchResult } from "./search.js";
 
 /**
+ * Panel system prompt — tells each panel model it's part of a multi-model
+ * deliberation and should provide a thorough, well-structured response.
+ */
+export const PANEL_SYSTEM_PROMPT = `You are participating in a multi-model panel answering a user's query. Provide a thorough, well-reasoned response.
+
+Structure your answer clearly with specific details, examples, and reasoning. Aim for depth — cover multiple angles of the question.
+
+Do not mention that you're part of a panel or that your response will be compared. Just answer the user directly as yourself.`;
+
+/**
  * Judge prompt — this is the core IP of the Fusion concept.
  * Instructs the judge model to produce structured analysis comparing panel responses.
  */

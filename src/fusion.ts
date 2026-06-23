@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { createModuleLogger } from "./logger.js";
 import {
   JUDGE_SYSTEM_PROMPT,
+  PANEL_SYSTEM_PROMPT,
   buildJudgeUserMessage,
   buildOuterSystemPrompt,
   formatSearchResults,
@@ -51,9 +52,13 @@ export async function runFusionPanelJudge(
 
   // ---- Step 1: parallel panel calls ----
   log.info("Panel stage: starting parallel calls", { count: panel.length });
+  const panelMessages = [
+    { role: "system" as const, content: PANEL_SYSTEM_PROMPT },
+    ...messages as LiteLLMCompletionRequest["messages"],
+  ];
   const panelParams: LiteLLMCompletionRequest[] = panel.map((model) => ({
     model,
-    messages: messages as LiteLLMCompletionRequest["messages"],
+    messages: panelMessages,
     temperature,
     max_tokens,
   }));
@@ -123,7 +128,7 @@ export async function runFusionPanelJudge(
   const judgeResult = await llm.complete({
     model: judge,
     messages: judgeMessages,
-    temperature: 0.3,
+    temperature: 0.5,
     max_tokens: Math.min(max_tokens, 4096),
     response_format: { type: "json_object" },
   });
@@ -185,16 +190,13 @@ export function buildOuterModelRequest(
   tools?: LiteLLMCompletionRequest["tools"],
 ): LiteLLMCompletionRequest {
   const outerSystemPrompt = buildOuterSystemPrompt(judgeRawContent);
-  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
 
   return {
     model: outerModel,
     messages: [
       { role: "system", content: outerSystemPrompt },
-      ...(lastUserMsg
-        ? [{ role: "user" as const, content: lastUserMsg.content }]
-        : []),
-    ],
+      ...messages,
+    ] as LiteLLMCompletionRequest["messages"],
     temperature,
     max_tokens,
     ...(tools ? { tools } : {}),

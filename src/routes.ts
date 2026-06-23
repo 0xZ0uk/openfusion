@@ -17,8 +17,10 @@ const llm = createLLMAdapter();
 
 const messageSchema = z.object({
   role: z.string(),
-  content: z.string(),
-});
+  content: z.string().nullable().optional(),
+  tool_calls: z.array(z.any()).optional(),
+  tool_call_id: z.string().optional(),
+}).passthrough();
 
 const fusionConfigSchema = z.object({
   panel: z.array(z.string()).min(1).max(8).optional(),
@@ -36,6 +38,8 @@ const fusionRequestSchema = z.object({
   temperature: z.number().min(0).max(2).optional(),
   max_tokens: z.number().int().positive().optional(),
   stream: z.boolean().optional(),
+  tools: z.array(z.any()).optional(),
+  tool_choice: z.union([z.string(), z.record(z.any())]).optional(),
 });
 
 // ---- App ----
@@ -102,7 +106,7 @@ app.post("/v1/chat/completions", async (c) => {
 
   if (!isFusion) {
     log.info("Proxying request to LiteLLM", { reqId, model: parsed.data.model });
-    return proxyToLiteLLM(c, parsed.data, reqId);
+    return proxyToLiteLLM(c, body, reqId);
   }
 
   const fc = resolveFusionConfig(fusion_config, parsed.data.model);
