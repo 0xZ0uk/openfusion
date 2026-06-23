@@ -101,7 +101,7 @@ Standard OpenAI chat completion endpoint. To trigger fusion, include `fusion_con
     "panel": ["anthropic/claude-sonnet-4", "openai/gpt-4o", "google/gemini-2.5-pro"],
     "judge": "anthropic/claude-sonnet-4",
     "outer_model": "anthropic/claude-sonnet-4",
-    "web_search": true
+    "web_search": false
   }
 }
 ```
@@ -168,7 +168,7 @@ curl http://localhost:4040/v1/chat/completions \
 | `outer_model` | `DEFAULT_OUTER_MODEL` env | Model that writes the final answer. Omit to return judge analysis directly |
 | `max_tokens` | `4096` | Max output tokens per inner call |
 | `temperature` | `0.7` | Sampling temperature (judge uses 0.3) |
-| `web_search` | `true` | Enable/disable web search for context |
+| `web_search` | `false` | Enable/disable web search. When enabled, the LLM decides when to invoke search as a tool |
 
 ## Deployment
 

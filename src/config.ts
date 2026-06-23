@@ -1,7 +1,9 @@
 import "dotenv/config";
 import { z } from "zod";
+import { setLogLevel } from "./logger.js";
 
 const envSchema = z.object({
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   LITELLM_BASE_URL: z.string().url().default("http://localhost:4000"),
   LITELLM_API_KEY: z.string().default("sk-litellm"),
   HOST: z.string().default("0.0.0.0"),
@@ -28,6 +30,7 @@ function loadConfig() {
     process.exit(1);
   }
   const env = result.data;
+  setLogLevel(env.LOG_LEVEL);
 
   return {
     litellm: {

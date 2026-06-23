@@ -81,8 +81,26 @@ export interface FusionResult extends PanelJudgeResult {
 
 export interface LiteLLMCompletionRequest {
   model: string;
-  messages: { role: string; content: string }[];
+  messages: { role: string; content: string; tool_calls?: ToolCall[]; tool_call_id?: string }[];
   temperature?: number;
   max_tokens?: number;
   response_format?: { type: "json_object" | "text" };
+  tools?: Array<{
+    type: "function";
+    function: {
+      name: string;
+      description: string;
+      parameters: Record<string, unknown>;
+    };
+  }>;
+  tool_choice?: "auto" | "none" | { type: "function"; function: { name: string } };
+}
+
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
 }

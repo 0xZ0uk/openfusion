@@ -1,4 +1,7 @@
 import { config } from "./config.js";
+import { createModuleLogger } from "./logger.js";
+
+const log = createModuleLogger("search");
 
 export interface SearchResult {
   title: string;
@@ -6,25 +9,53 @@ export interface SearchResult {
   url: string;
 }
 
+export const SEARCH_TOOL = {
+  type: "function" as const,
+  function: {
+    name: "search_web",
+    description:
+      "Search the web for current information. Use this when you need facts, recent events, or information beyond your training data to answer the user's query accurately.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query to look up",
+        },
+      },
+      required: ["query"],
+    },
+  },
+};
+
 /**
  * Web search with Brave Search API (primary) → DuckDuckGo instant answer (fallback).
  */
 export async function searchWeb(query: string): Promise<SearchResult[]> {
+  log.info("Searching web", { query: query.slice(0, 120) });
+
   // Try Brave first if API key is set
   if (config.search.braveApiKey) {
     try {
       const results = await braveSearch(query);
+      log.info("Brave search complete", { count: results.length });
       if (results.length > 0) return results;
     } catch (err) {
-      console.warn(`[search] Brave failed, falling back to DDG: ${err}`);
+      log.warn("Brave failed, falling back to DDG", {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
   // Fall back to DuckDuckGo
   try {
-    return await ddgSearch(query);
+    const results = await ddgSearch(query);
+    log.info("DDG search complete", { count: results.length });
+    return results;
   } catch (err) {
-    console.error(`[search] DDG fallback also failed: ${err}`);
+    log.error("DDG fallback also failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return [];
   }
 }

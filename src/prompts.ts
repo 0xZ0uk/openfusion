@@ -77,21 +77,16 @@ export function buildJudgeUserMessage(
 /**
  * Build the outer-model system prompt: analysis gets appended as context.
  */
-export function buildOuterSystemPrompt(
-  analysis: string,
-  searchContext: string,
-): string {
-  const searchSection = searchContext
-    ? `\n## Web Search Context\n${searchContext}\n`
-    : "";
-
+export function buildOuterSystemPrompt(analysis: string): string {
   return `You are a helpful assistant. Below is a multi-model analysis of the user's query. Use it to write a thorough, well-structured final answer.
 
 ## Multi-Model Analysis
-${analysis}${searchSection}
+${analysis}
 
 ## Your task
-Answer the user's original question, drawing on the analysis above. Synthesize the consensus, acknowledge contradictions where relevant, and fill in any blind spots identified. Write directly to the user — do not reference "the analysis" or "the models" in your response.`;
+Answer the user's original question, drawing on the analysis above. Synthesize the consensus, acknowledge contradictions where relevant, and fill in any blind spots identified. Write directly to the user — do not reference "the analysis" or "the models" in your response.
+
+When you need current or factual information beyond your knowledge, use the available search tool to look it up. Do not search for information you already know or for conversational/non-factual queries.`;
 }
 
 /**
