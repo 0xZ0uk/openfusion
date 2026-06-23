@@ -6,7 +6,7 @@ Openfusion is a self-hosted proxy that runs a panel of LLMs in parallel, lets a 
 
 ```
 Your App → Openfusion → LiteLLM (your proxy)
-                            ├── Yunwu / Anthropic / OpenAI / Google
+                            ├── Anthropic / OpenAI / Google
                             ├── your keys, your billing
                             └── your data, your infra
 ```
