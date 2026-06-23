@@ -14,7 +14,11 @@ function getClient(): OpenAI {
       apiKey: config.litellm.apiKey,
       baseURL: `${config.litellm.baseUrl}/v1`,
       maxRetries: 1,
-      timeout: 120_000, // 2 min per model call
+      timeout: 120_000,
+      defaultHeaders: {
+        "User-Agent": "fusion-service",
+      },
+      fetch: globalThis.fetch as any,
     });
   }
   return _client;
