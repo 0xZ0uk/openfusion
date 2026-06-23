@@ -9,11 +9,9 @@ import {
   runFusion,
   runFusionPanelJudge,
   resolveFusionConfig,
-  buildOuterModelRequest,
+  runOuterModel,
 } from "./fusion.js";
-import { callLiteLLMStream, resolveTools } from "./litellm.js";
-import { searchWeb, SEARCH_TOOL } from "./search.js";
-import { formatSearchResults } from "./prompts.js";
+import { callLiteLLMStream } from "./litellm.js";
 
 const appLog = createModuleLogger("app");
 
@@ -248,50 +246,13 @@ async function handleFusionStream(
         return;
       }
 
-      // 3. If web_search enabled, let the LLM decide whether to search before streaming
-      const searchEnabled = fc.web_search && config.search.enabled;
-      let outerReq: ReturnType<typeof buildOuterModelRequest>;
-
-      if (searchEnabled) {
-        appLog.info("Streaming: resolving tools with web search", { reqId });
-        outerReq = buildOuterModelRequest(
-          judgeRawContent,
-          messages,
-          fc.outer_model,
-          fc.temperature,
-          fc.max_tokens,
-          [SEARCH_TOOL],
-        );
-
-        const getQuery = () => {
-          const last = [...messages].reverse().find((m) => m.role === "user");
-          return last?.content ?? "";
-        };
-
-        const { messages: resolvedMessages } = await resolveTools(
-          outerReq,
-          async (_name, args) => {
-            const query = (args.query as string) || getQuery();
-            const results = await searchWeb(query);
-            appLog.info("Streaming: web search handler", {
-              reqId,
-              query: query.slice(0, 100),
-              results_count: results.length,
-            });
-            return formatSearchResults(results) || "No results found.";
-          },
-        );
-        // Use the resolved messages (which include tool results) directly
-        outerReq = { ...outerReq, messages: resolvedMessages, tools: undefined };
-      } else {
-        outerReq = buildOuterModelRequest(
-          judgeRawContent,
-          messages,
-          fc.outer_model,
-          fc.temperature,
-          fc.max_tokens,
-        );
-      }
+      // 3. Resolve outer model messages (including web search if enabled)
+      appLog.info("Streaming: resolving outer model messages", { reqId });
+      const outerResult = await runOuterModel(
+        judgeRawContent,
+        messages,
+        fc as any,
+      );
 
       // 4. Stream outer model
       appLog.info("Streaming: starting outer model stream", {
@@ -313,7 +274,12 @@ async function handleFusionStream(
       });
 
       let streamedContent = "";
-      for await (const chunk of callLiteLLMStream(outerReq)) {
+      for await (const chunk of callLiteLLMStream({
+        model: fc.outer_model,
+        messages: outerResult.resolvedMessages,
+        temperature: fc.temperature,
+        max_tokens: fc.max_tokens,
+      })) {
         const choice = chunk.choices?.[0];
         if (choice?.delta?.content) {
           streamedContent += choice.delta.content;

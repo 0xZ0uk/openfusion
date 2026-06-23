@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { callLiteLLM, callLiteLLMWithTools } from "./litellm.js";
+import { callLiteLLM, resolveTools } from "./litellm.js";
 import { createModuleLogger } from "./logger.js";
 import {
   JUDGE_SYSTEM_PROMPT,
@@ -200,6 +200,62 @@ export function buildOuterModelRequest(
 }
 
 /**
+ * Run just the outer model stage: resolve messages (including web search if enabled)
+ * and return the final message array. The caller is responsible for the final LLM call
+ * (streaming or non-streaming).
+ */
+export async function runOuterModel(
+  judgeRawContent: string,
+  messages: { role: string; content: string }[],
+  fusionConfig: Required<FusionConfig>,
+): Promise<{
+  resolvedMessages: LiteLLMCompletionRequest["messages"];
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}> {
+  const { outer_model: outerModel, web_search, temperature, max_tokens } = fusionConfig;
+
+  if (web_search && config.search.enabled) {
+    log.info("Outer model: web search enabled");
+    const outerReq = buildOuterModelRequest(
+      judgeRawContent,
+      messages,
+      outerModel,
+      temperature,
+      max_tokens,
+      [SEARCH_TOOL],
+    );
+
+    const resolved = await resolveTools(outerReq, async (_name, args) => {
+      const query = (args.query as string) || getLastUserMessage(messages);
+      const results = await searchWeb(query);
+      log.info("Outer model search handler", {
+        query: query.slice(0, 100),
+        results_count: results.length,
+      });
+      return formatSearchResults(results) || "No results found.";
+    });
+
+    return {
+      resolvedMessages: resolved.messages,
+      usage: resolved.usage,
+    };
+  }
+
+  const outerReq = buildOuterModelRequest(
+    judgeRawContent,
+    messages,
+    outerModel,
+    temperature,
+    max_tokens,
+  );
+
+  return {
+    resolvedMessages: outerReq.messages,
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+  };
+}
+
+/**
  * Run the full Fusion pipeline (non-streaming):
  *   1. Parallel panel calls  →  panel responses
  *   2. Judge analysis        →  structured JSON
@@ -219,57 +275,43 @@ export async function runFusion(input: FusionInput): Promise<FusionResult> {
   if (outerModel) {
     log.info("Outer model stage: starting", { outer_model: outerModel });
     const outerStart = Date.now();
-    let outerResult;
-    if (fusionConfig.web_search && config.search.enabled) {
-      log.info("Outer model: web search enabled");
-      const outerReq = buildOuterModelRequest(
-        judgeRawContent,
-        messages,
-        outerModel,
-        fusionConfig.temperature,
-        fusionConfig.max_tokens,
-        [SEARCH_TOOL],
-      );
 
-      outerResult = await callLiteLLMWithTools(
-        outerReq,
-        async (_name, args) => {
-          const query = (args.query as string) || getLastUserMessage(messages);
-          const results = await searchWeb(query);
-          log.info("Outer model search handler", {
-            query: query.slice(0, 100),
-            results_count: results.length,
-          });
-          return formatSearchResults(results) || "No results found.";
-        },
-      );
-    } else {
-      const outerReq = buildOuterModelRequest(
-        judgeRawContent,
-        messages,
-        outerModel,
-        fusionConfig.temperature,
-        fusionConfig.max_tokens,
-      );
-      outerResult = await callLiteLLM(outerReq);
-    }
+    const outerResult = await runOuterModel(
+      judgeRawContent,
+      messages,
+      fusionConfig,
+    );
+
+    const finalResult = await callLiteLLM({
+      model: outerModel,
+      messages: outerResult.resolvedMessages,
+      temperature: fusionConfig.temperature,
+      max_tokens: fusionConfig.max_tokens,
+    });
 
     const outerDuration = Date.now() - outerStart;
     const totalDuration = Date.now() - totalStart;
+
+    const totalUsage = {
+      prompt_tokens: usage.prompt_tokens + outerResult.usage.prompt_tokens + (finalResult.usage?.prompt_tokens ?? 0),
+      completion_tokens: usage.completion_tokens + outerResult.usage.completion_tokens + (finalResult.usage?.completion_tokens ?? 0),
+      total_tokens: usage.total_tokens + outerResult.usage.total_tokens + (finalResult.usage?.total_tokens ?? 0),
+    };
+
     log.info("Fusion pipeline complete", {
       totalDurationMs: totalDuration,
       outerDurationMs: outerDuration,
       outer_model: outerModel,
-      final_answer_length: outerResult.content.length,
-      usage,
+      final_answer_length: finalResult.content.length,
+      usage: totalUsage,
     });
 
     return {
-      finalAnswer: outerResult.content,
+      finalAnswer: finalResult.content,
       panelResponses,
       analysis,
       judgeRawContent,
-      usage,
+      usage: totalUsage,
     };
   }
 
