@@ -1,0 +1,27 @@
+{
+  "name": "fusion-service",
+  "version": "0.1.0",
+  "description": "Self-hosted multi-model deliberation proxy — panel, judge, and compose. OpenAI-compatible.",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "docker:build": "docker build -t fusion-service .",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.6",
+    "dotenv": "^16.4.0",
+    "hono": "^4.6.0",
+    "openai": "^4.73.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
