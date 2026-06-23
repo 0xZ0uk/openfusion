@@ -56,8 +56,8 @@ git clone https://github.com/0xZ0uk/openfusion.git
 cd openfusion
 cp .env.example .env
 # Edit .env: set LITELLM_BASE_URL and LITELLM_API_KEY
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 ### Run with Docker
